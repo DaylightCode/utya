@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Application, Assets, Container, Sprite, Texture } from "pixi.js"
+import { Application, Assets, Container, Sprite, Texture, Ticker } from "pixi.js"
 
 type GameState = "menu" | "playing" | "gameover"
 
@@ -197,10 +197,12 @@ class FlappyGame {
   private ready = false
   private destroyed = false
 
-  constructor(
-    private host: HTMLElement,
-    private callbacks: GameCallbacks,
-  ) {
+  private host: HTMLElement
+  private callbacks: GameCallbacks
+
+  constructor(host: HTMLElement, callbacks: GameCallbacks) {
+    this.host = host
+    this.callbacks = callbacks
     void this.init()
   }
 
@@ -266,7 +268,7 @@ class FlappyGame {
     this.resetBird()
     this.startRound()
 
-    this.app.ticker.add((ticker) => {
+    this.app.ticker.add((ticker: Ticker) => {
       this.update(Math.min(ticker.deltaMS / MS_IN_SECOND, PHYSICS.maxFrameDelta))
     })
 
