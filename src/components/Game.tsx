@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Application, Assets, Container, Sprite, Texture, Ticker } from "pixi.js"
+import { Application, Assets, Container, Rectangle, Sprite, Texture, Ticker } from "pixi.js"
 
 type GameState = "menu" | "playing" | "gameover"
 
@@ -63,9 +63,10 @@ const PIPE = {
   speed: 2,
   spawnInterval: 2,
   extensionHeight: 50,
-  gapTopEdge: -0.175,
-  gapBottomEdge: 1.275,
+  gapSize: 2.2,
+  gapCenterY: 0.55,
   gapRandomRange: 1.4,
+  bodySliceRatio: 0.2,
 }
 
 const PIPE_SPACING = PIPE.speed * PIPE.spawnInterval
@@ -154,8 +155,8 @@ const clamp = (value: number, min: number, max: number) => Math.min(max, Math.ma
 const randomGapOffset = () => (Math.random() * 2 - 1) * PIPE.gapRandomRange
 
 const getGapEdges = (gapOffset: number) => ({
-  bottomEdgeY: PIPE.gapTopEdge + gapOffset,
-  topEdgeY: PIPE.gapBottomEdge + gapOffset,
+  bottomEdgeY: PIPE.gapCenterY + gapOffset - PIPE.gapSize / 2,
+  topEdgeY: PIPE.gapCenterY + gapOffset + PIPE.gapSize / 2,
 })
 
 const applyCollisionMargin = (box: Box): Box => ({
@@ -176,6 +177,16 @@ function createSprite(texture: Texture, width: number, height: number): Sprite {
   return sprite
 }
 
+function createPipeBodyTexture(texture: Texture): Texture {
+  const { x, y, width, height } = texture.frame
+  const sliceHeight = height * PIPE.bodySliceRatio
+
+  return new Texture({
+    source: texture.source,
+    frame: new Rectangle(x, y + height - sliceHeight, width, sliceHeight),
+  })
+}
+
 class FlappyGame {
   private app = new Application()
   private world = new Container()
@@ -183,6 +194,7 @@ class FlappyGame {
   private pipeLayer = new Container()
   private bird!: Sprite
   private pipeTexture!: Texture
+  private pipeBodyTexture!: Texture
 
   private pipes: Pipe[] = []
   private state: GameState = "menu"
@@ -261,6 +273,7 @@ class FlappyGame {
     if (this.destroyed) return
 
     this.pipeTexture = pipeTexture
+    this.pipeBodyTexture = createPipeBodyTexture(pipeTexture)
     this.buildScene(birdTexture)
     this.layout()
     this.app.renderer.on("resize", this.layout)
@@ -338,13 +351,20 @@ class FlappyGame {
     const bottom = createSprite(this.pipeTexture, PIPE.width, PIPE.height)
     bottom.y = worldToScreenY(bottomEdgeY - PIPE.height / 2)
 
+    const bottomBody = createSprite(this.pipeBodyTexture, PIPE.width, PIPE.extensionHeight)
+    bottomBody.y = worldToScreenY(bottomEdgeY - PIPE.height - PIPE.extensionHeight / 2)
+
     const top = createSprite(this.pipeTexture, PIPE.width, PIPE.height)
     top.rotation = HALF_TURN
     top.y = worldToScreenY(topEdgeY + PIPE.height / 2)
 
+    const topBody = createSprite(this.pipeBodyTexture, PIPE.width, PIPE.extensionHeight)
+    topBody.rotation = HALF_TURN
+    topBody.y = worldToScreenY(topEdgeY + PIPE.height + PIPE.extensionHeight / 2)
+
     const container = new Container()
     container.x = x
-    container.addChild(bottom, top)
+    container.addChild(bottomBody, bottom, topBody, top)
     this.pipeLayer.addChild(container)
 
     this.pipes.push({ container, x, gapOffset, scored: false })
