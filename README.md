@@ -10,6 +10,7 @@ Landing page for $UTYA - a community-driven memecoin on the TON Blockchain, feat
 * TypeScript
 * Tailwind CSS
 * GSAP (ScrollTrigger animations)
+* PixiJS
 
 ✨ Key Features
 * Animated Hero Section - scroll-triggered reveal animations via GSAP
