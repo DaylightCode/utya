@@ -1,421 +1,576 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
-import { Canvas, useFrame, useLoader, useThree } from "@react-three/fiber"
-import * as THREE from "three"
+import { useCallback, useEffect, useRef, useState } from "react"
+import { Application, Assets, Container, Sprite, Texture } from "pixi.js"
 
 type GameState = "menu" | "playing" | "gameover"
 
-const GRAVITY = -9.8
-const JUMP_VELOCITY = 4
-
-const GAME_WIDTH = 6
-const GAME_HEIGHT = 8
-
-const BIRD_X = -2
-const BIRD_WIDTH = 0.8
-const BIRD_HEIGHT = 0.62
-
-const PIPE_WIDTH = 0.65
-const PIPE_HEIGHT = 1.45
-const PIPE_SPEED = 2
-const PIPE_SPAWN_INTERVAL = 2
-const PIPE_SPACING = PIPE_SPEED * PIPE_SPAWN_INTERVAL
-const PIPE_EXTENSION_HEIGHT = 50
-const PIPE_GAP_TOP_EDGE = -0.175
-const PIPE_GAP_BOTTOM_EDGE = 1.275
-const PIPE_GAP_RANDOM_RANGE = 1.4
-
-const COLLISION_MARGIN_X = 0.05
-const COLLISION_MARGIN_Y = 0.05
-
-function ResponsiveCamera() {
-  const { camera, size } = useThree()
-
-  useEffect(() => {
-    const widthZoom = size.width / GAME_WIDTH
-    const heightZoom = size.height / GAME_HEIGHT
-    const zoom = Math.min(widthZoom, heightZoom)
-    camera.zoom = zoom
-    camera.updateProjectionMatrix()
-  }, [size, camera])
-
-  return null
-}
-
-function Bird({ meshRef, gameState, onGameOver, jumpRef }: {
-  meshRef: React.RefObject<THREE.Mesh | null>
-  gameState: GameState
-  onGameOver: () => void
-  jumpRef: React.MutableRefObject<() => void>
-}) {
-  const velocity = useRef(0)
-  const texture = useLoader(THREE.TextureLoader, "/bird.png")
-
-  function jump() {
-    velocity.current = JUMP_VELOCITY
-  }
-
-  useEffect(() => {
-    jumpRef.current = jump
-  })
-
-  useEffect(() => {
-    if (!meshRef.current) return
-    if (gameState === "playing" || gameState === "gameover") {
-      meshRef.current.position.y = 0
-      meshRef.current.rotation.z = 0
-      velocity.current = 0
-    }
-  }, [gameState])
-
-  useEffect(() => {
-    function handleJump(event: KeyboardEvent) {
-      if (event.code === "Space") {
-        event.preventDefault()
-        jump()
-      }
-    }
-
-    window.addEventListener("keydown", handleJump)
-    return () => window.removeEventListener("keydown", handleJump)
-  }, [])
-
-  useFrame((state, delta) => {
-    if (!meshRef.current) return
-    if (gameState !== "playing") return
-
-    velocity.current += GRAVITY * delta
-    meshRef.current.position.y += velocity.current * delta
-    meshRef.current.rotation.z = THREE.MathUtils.clamp(velocity.current * 0.15, -0.5, 0.8)
-
-    const fallLimit = -state.viewport.height / 2 + 1.5
-    if (meshRef.current.position.y < fallLimit) {
-      onGameOver()
-    }
-  })
-
-  return (
-    <mesh ref={meshRef} position={[BIRD_X, 0, 0]}>
-      <planeGeometry args={[BIRD_WIDTH, BIRD_HEIGHT]} />
-      <meshStandardMaterial map={texture} transparent />
-    </mesh>
-  )
-}
-
-function PipePair({ x, gapOffset, gameState, despawnX, onRefsReady, onOffscreen }: {
+type Pipe = {
+  container: Container
   x: number
   gapOffset: number
-  gameState: GameState
-  despawnX: number
-  onRefsReady: (bottomRef: React.RefObject<THREE.Group | null>, topRef: React.RefObject<THREE.Group | null>) => void
-  onOffscreen: () => void
-}) {
-  const groupRef = useRef<THREE.Group>(null)
-  const bottomGroupRef = useRef<THREE.Group>(null)
-  const topGroupRef = useRef<THREE.Group>(null)
-  const texture = useLoader(THREE.TextureLoader, "/pipe.png")
-
-  const bottomEdgeY = PIPE_GAP_TOP_EDGE + gapOffset
-  const topEdgeY = PIPE_GAP_BOTTOM_EDGE + gapOffset
-
-  const bottomVisibleY = bottomEdgeY - PIPE_HEIGHT / 2
-  const bottomExtensionY = bottomEdgeY - PIPE_HEIGHT - PIPE_EXTENSION_HEIGHT / 2
-
-  const topVisibleY = topEdgeY + PIPE_HEIGHT / 2
-  const topExtensionY = topEdgeY + PIPE_HEIGHT + PIPE_EXTENSION_HEIGHT / 2
-
-  useEffect(() => {
-    onRefsReady(bottomGroupRef, topGroupRef)
-  }, [])
-
-  useFrame((_, delta) => {
-    if (!groupRef.current) return
-    if (gameState !== "playing") return
-
-    groupRef.current.position.x -= PIPE_SPEED * delta
-    if (groupRef.current.position.x < despawnX) {
-      onOffscreen()
-    }
-  })
-
-  return (
-    <group ref={groupRef} position={[x, 0, 0]}>
-      <group ref={bottomGroupRef}>
-        <mesh position={[0, bottomVisibleY, 0]}>
-          <planeGeometry args={[PIPE_WIDTH, PIPE_HEIGHT]} />
-          <meshStandardMaterial map={texture} transparent />
-        </mesh>
-        <mesh position={[0, bottomExtensionY, 0]}>
-          <planeGeometry args={[PIPE_WIDTH, PIPE_EXTENSION_HEIGHT]} />
-          <meshBasicMaterial transparent opacity={0} depthWrite={false} />
-        </mesh>
-      </group>
-      <group ref={topGroupRef}>
-        <mesh position={[0, topVisibleY, 0]} rotation={[0, 0, Math.PI]}>
-          <planeGeometry args={[PIPE_WIDTH, PIPE_HEIGHT]} />
-          <meshStandardMaterial map={texture} transparent />
-        </mesh>
-        <mesh position={[0, topExtensionY, 0]}>
-          <planeGeometry args={[PIPE_WIDTH, PIPE_EXTENSION_HEIGHT]} />
-          <meshBasicMaterial transparent opacity={0} depthWrite={false} />
-        </mesh>
-      </group>
-    </group>
-  )
+  scored: boolean
 }
 
-type PipeData = { id: number; x: number; scoreAt: number; gapOffset: number }
+type Box = {
+  minX: number
+  maxX: number
+  minY: number
+  maxY: number
+}
 
-function PipeManager({ gameState, birdX, onRefsChange, onScore }: {
-  gameState: GameState
-  birdX: number
-  onRefsChange: (refs: React.RefObject<THREE.Group | null>[]) => void
+type GameCallbacks = {
+  onReady: () => void
   onScore: () => void
-}) {
-  const viewport = useThree((state) => state.viewport)
-  const spawnX = viewport.width / 2 + 0.5
-  const despawnX = -viewport.width / 2 - 0.5
+  onGameOver: () => void
+}
 
-  const [pipes, setPipes] = useState<PipeData[]>([])
-  const allRefs = useRef<Map<number, React.RefObject<THREE.Group | null>[]>>(new Map())
-  const nextId = useRef(0)
-  const spawnTimer = useRef(0)
-  const gameTime = useRef(0)
-  const scoredIds = useRef<Set<number>>(new Set())
+const ASSETS = {
+  bird: "/bird.png",
+  pipe: "/pipe.png",
+}
 
-  function randomGapOffset() {
-    return (Math.random() * 2 - 1) * PIPE_GAP_RANDOM_RANGE
+const RENDER = {
+  backgroundAlpha: 0,
+  maxResolution: 2,
+}
+
+const WORLD = {
+  width: 6,
+  height: 8,
+  offsetY: -1.5,
+  spawnMargin: 0.5,
+}
+
+const PHYSICS = {
+  gravity: -9.8,
+  jumpVelocity: 4,
+  maxFrameDelta: 0.05,
+}
+
+const BIRD = {
+  x: -2,
+  width: 0.8,
+  height: 0.62,
+  tiltFactor: 0.15,
+  minTilt: -0.5,
+  maxTilt: 0.8,
+}
+
+const PIPE = {
+  width: 0.65,
+  height: 1.45,
+  speed: 2,
+  spawnInterval: 2,
+  extensionHeight: 50,
+  gapTopEdge: -0.175,
+  gapBottomEdge: 1.275,
+  gapRandomRange: 1.4,
+}
+
+const PIPE_SPACING = PIPE.speed * PIPE.spawnInterval
+
+const COLLISION_MARGIN = {
+  x: 0.05,
+  y: 0.05,
+}
+
+const SPRITE_ANCHOR = 0.5
+const HALF_TURN = Math.PI
+const MS_IN_SECOND = 1000
+const JUMP_KEY = "Space"
+
+const CANVAS_STYLE: Partial<CSSStyleDeclaration> = {
+  display: "block",
+  width: "100%",
+  height: "100%",
+  touchAction: "none",
+}
+
+const LABELS = {
+  play: "Play",
+  restart: "Restart",
+  gameOver: "Game Over",
+}
+
+const ROOT_STYLE: React.CSSProperties = {
+  width: "100%",
+  height: "100dvh",
+  position: "relative",
+  zIndex: 0,
+  touchAction: "none",
+  overscrollBehavior: "none",
+  userSelect: "none",
+  WebkitUserSelect: "none",
+}
+
+const HOST_STYLE: React.CSSProperties = {
+  position: "absolute",
+  inset: 0,
+}
+
+const CENTERED_STYLE: React.CSSProperties = {
+  position: "absolute",
+  top: "50%",
+  left: "50%",
+  transform: "translate(-50%, -50%)",
+}
+
+const BUTTON_STYLE: React.CSSProperties = {
+  ...CENTERED_STYLE,
+  fontSize: "clamp(1.1rem, 5vw, 1.5rem)",
+}
+
+const GAME_OVER_TITLE_STYLE: React.CSSProperties = {
+  fontSize: "clamp(1.5rem, 7vw, 2rem)",
+}
+
+const SCORE_STYLE: React.CSSProperties = {
+  position: "absolute",
+  top: "80px",
+  left: "50%",
+  transform: "translateX(-50%)",
+  fontSize: "clamp(1.75rem, 8vw, 2.25rem)",
+}
+
+const ROOT_CLASS = "bg-[var(--light-blue)]"
+const GAME_OVER_CLASS = "flex flex-col items-center gap-4 px-4 text-center"
+const GAME_OVER_TITLE_CLASS = "font-bold text-white mb-24"
+const SCORE_CLASS = "font-bold text-white pointer-events-none"
+const BUTTON_CLASS =
+  "bg-[#F8C82E] px-6 py-2 font-bold border-2 rounded-full shadow-[0_2px_0_0_#000] hover:shadow-[0_0px_0_0_#000] hover:translate-y-[2px] transition-all duration-150 ease-out cursor-pointer flex items-center gap-2"
+
+const PLAY_ICON = {
+  size: 20,
+  viewBox: "0 0 43 54",
+  path: "M0.5 51.861V1.50235C0.5 0.698763 1.39986 0.223396 2.06364 0.676329L41.6977 27.7208C42.3034 28.134 42.2731 29.037 41.6411 29.4087L2.00702 52.7229C1.34039 53.115 0.5 52.6344 0.5 51.861Z",
+  color: "black",
+}
+
+const worldToScreenY = (y: number) => -y
+
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
+
+const randomGapOffset = () => (Math.random() * 2 - 1) * PIPE.gapRandomRange
+
+const getGapEdges = (gapOffset: number) => ({
+  bottomEdgeY: PIPE.gapTopEdge + gapOffset,
+  topEdgeY: PIPE.gapBottomEdge + gapOffset,
+})
+
+const applyCollisionMargin = (box: Box): Box => ({
+  minX: box.minX + COLLISION_MARGIN.x,
+  maxX: box.maxX - COLLISION_MARGIN.x,
+  minY: box.minY + COLLISION_MARGIN.y,
+  maxY: box.maxY - COLLISION_MARGIN.y,
+})
+
+const boxesIntersect = (a: Box, b: Box) =>
+  a.minX <= b.maxX && a.maxX >= b.minX && a.minY <= b.maxY && a.maxY >= b.minY
+
+function createSprite(texture: Texture, width: number, height: number): Sprite {
+  const sprite = new Sprite(texture)
+  sprite.anchor.set(SPRITE_ANCHOR)
+  sprite.width = width
+  sprite.height = height
+  return sprite
+}
+
+class FlappyGame {
+  private app = new Application()
+  private world = new Container()
+  private group = new Container()
+  private pipeLayer = new Container()
+  private bird!: Sprite
+  private pipeTexture!: Texture
+
+  private pipes: Pipe[] = []
+  private state: GameState = "menu"
+  private view = { width: WORLD.width, height: WORLD.height }
+
+  private birdY = 0
+  private velocity = 0
+  private tilt = 0
+  private spawnTimer = 0
+
+  private appInitialized = false
+  private ready = false
+  private destroyed = false
+
+  constructor(
+    private host: HTMLElement,
+    private callbacks: GameCallbacks,
+  ) {
+    void this.init()
   }
 
-  function spawnPipe(x: number) {
-    const scoreAt = gameTime.current + (x - birdX) / PIPE_SPEED
-    setPipes((prev) => [...prev, { id: nextId.current, x, scoreAt, gapOffset: randomGapOffset() }])
-    nextId.current += 1
+  start() {
+    if (!this.ready) return
+    this.resetBird()
+    this.startRound()
+    this.state = "playing"
   }
 
-  function startRound() {
-    allRefs.current.clear()
-    onRefsChange([])
-    nextId.current = 0
-    gameTime.current = 0
-    scoredIds.current = new Set()
+  jump() {
+    if (this.state !== "playing") return
+    this.velocity = PHYSICS.jumpVelocity
+  }
 
-    const positions: number[] = []
-    let x = 0
-    while (x < spawnX) {
-      positions.push(x)
-      x += PIPE_SPACING
+  destroy() {
+    this.destroyed = true
+    if (this.appInitialized) {
+      this.app.destroy(true, { children: true })
+    }
+  }
+
+  private get spawnX() {
+    return this.view.width / 2 + WORLD.spawnMargin
+  }
+
+  private get despawnX() {
+    return -this.view.width / 2 - WORLD.spawnMargin
+  }
+
+  private get floorY() {
+    return -this.view.height / 2 - WORLD.offsetY
+  }
+
+  private async init() {
+    await this.app.init({
+      resizeTo: this.host,
+      backgroundAlpha: RENDER.backgroundAlpha,
+      antialias: true,
+      autoDensity: true,
+      resolution: Math.min(window.devicePixelRatio || 1, RENDER.maxResolution),
+    })
+    this.appInitialized = true
+
+    if (this.destroyed) {
+      this.app.destroy(true, { children: true })
+      return
     }
 
+    this.mountCanvas()
+
+    const [birdTexture, pipeTexture] = await Promise.all([
+      Assets.load<Texture>(ASSETS.bird),
+      Assets.load<Texture>(ASSETS.pipe),
+    ])
+    if (this.destroyed) return
+
+    this.pipeTexture = pipeTexture
+    this.buildScene(birdTexture)
+    this.layout()
+    this.app.renderer.on("resize", this.layout)
+
+    this.resetBird()
+    this.startRound()
+
+    this.app.ticker.add((ticker) => {
+      this.update(Math.min(ticker.deltaMS / MS_IN_SECOND, PHYSICS.maxFrameDelta))
+    })
+
+    this.ready = true
+    this.callbacks.onReady()
+  }
+
+  private mountCanvas() {
+    Object.assign(this.app.canvas.style, CANVAS_STYLE)
+    this.host.appendChild(this.app.canvas)
+  }
+
+  private buildScene(birdTexture: Texture) {
+    this.bird = createSprite(birdTexture, BIRD.width, BIRD.height)
+    this.bird.x = BIRD.x
+
+    this.group.addChild(this.pipeLayer, this.bird)
+    this.world.addChild(this.group)
+    this.app.stage.addChild(this.world)
+  }
+
+  private layout = () => {
+    const { width, height } = this.app.screen
+    const zoom = Math.min(width / WORLD.width, height / WORLD.height)
+
+    this.view = { width: width / zoom, height: height / zoom }
+    this.world.position.set(width / 2, height / 2)
+    this.world.scale.set(zoom)
+    this.group.position.set(0, worldToScreenY(WORLD.offsetY))
+  }
+
+  private resetBird() {
+    this.birdY = 0
+    this.velocity = 0
+    this.tilt = 0
+    this.renderBird()
+  }
+
+  private renderBird() {
+    this.bird.y = worldToScreenY(this.birdY)
+    this.bird.rotation = -this.tilt
+  }
+
+  private startRound() {
+    this.clearPipes()
+
+    const positions = this.getInitialPipePositions()
     const lastX = positions[positions.length - 1]
-    spawnTimer.current = PIPE_SPAWN_INTERVAL - (PIPE_SPACING + lastX - spawnX) / PIPE_SPEED
+    const distanceToNextSpawn = PIPE_SPACING + lastX - this.spawnX
 
-    setPipes(positions.map((posX) => ({
-      id: nextId.current++,
-      x: posX,
-      scoreAt: (posX - birdX) / PIPE_SPEED,
-      gapOffset: randomGapOffset(),
-    })))
+    this.spawnTimer = PIPE.spawnInterval - distanceToNextSpawn / PIPE.speed
+    positions.forEach((x) => this.spawnPipe(x))
   }
 
-  function handleRefsReady(id: number, bottomRef: React.RefObject<THREE.Group | null>, topRef: React.RefObject<THREE.Group | null>) {
-    allRefs.current.set(id, [bottomRef, topRef])
-    onRefsChange(Array.from(allRefs.current.values()).flat())
-  }
-
-  function removePipe(id: number) {
-    setPipes((prev) => prev.filter((p) => p.id !== id))
-    allRefs.current.delete(id)
-    onRefsChange(Array.from(allRefs.current.values()).flat())
-  }
-
-  useEffect(() => {
-    startRound()
-  }, [])
-
-  const prevGameState = useRef(gameState)
-  useEffect(() => {
-    if (gameState === "playing" && prevGameState.current !== "playing") {
-      startRound()
+  private getInitialPipePositions() {
+    const positions: number[] = []
+    for (let x = 0; x < this.spawnX; x += PIPE_SPACING) {
+      positions.push(x)
     }
-    prevGameState.current = gameState
-  }, [gameState])
+    return positions
+  }
 
-  useFrame((_, delta) => {
-    if (gameState !== "playing") return
+  private spawnPipe(x: number) {
+    const gapOffset = randomGapOffset()
+    const { bottomEdgeY, topEdgeY } = getGapEdges(gapOffset)
 
-    gameTime.current += delta
-    spawnTimer.current += delta
+    const bottom = createSprite(this.pipeTexture, PIPE.width, PIPE.height)
+    bottom.y = worldToScreenY(bottomEdgeY - PIPE.height / 2)
 
-    if (spawnTimer.current >= PIPE_SPAWN_INTERVAL) {
-      spawnTimer.current = 0
-      spawnPipe(spawnX)
+    const top = createSprite(this.pipeTexture, PIPE.width, PIPE.height)
+    top.rotation = HALF_TURN
+    top.y = worldToScreenY(topEdgeY + PIPE.height / 2)
+
+    const container = new Container()
+    container.x = x
+    container.addChild(bottom, top)
+    this.pipeLayer.addChild(container)
+
+    this.pipes.push({ container, x, gapOffset, scored: false })
+  }
+
+  private removePipe(index: number) {
+    this.pipes[index].container.destroy({ children: true })
+    this.pipes.splice(index, 1)
+  }
+
+  private clearPipes() {
+    while (this.pipes.length > 0) {
+      this.removePipe(this.pipes.length - 1)
     }
+  }
 
-    for (const pipe of pipes) {
-      if (!scoredIds.current.has(pipe.id) && gameTime.current >= pipe.scoreAt) {
-        scoredIds.current.add(pipe.id)
-        onScore()
+  private update(delta: number) {
+    if (this.state !== "playing") return
+
+    this.updateBird(delta)
+    this.updatePipes(delta)
+    this.spawnPipesIfNeeded(delta)
+
+    if (this.hasFallen() || this.hasCollided()) {
+      this.finishGame()
+    }
+  }
+
+  private updateBird(delta: number) {
+    this.velocity += PHYSICS.gravity * delta
+    this.birdY += this.velocity * delta
+    this.tilt = clamp(this.velocity * BIRD.tiltFactor, BIRD.minTilt, BIRD.maxTilt)
+    this.renderBird()
+  }
+
+  private updatePipes(delta: number) {
+    for (let i = this.pipes.length - 1; i >= 0; i--) {
+      const pipe = this.pipes[i]
+      pipe.x -= PIPE.speed * delta
+      pipe.container.x = pipe.x
+
+      this.scoreIfPassed(pipe)
+
+      if (pipe.x < this.despawnX) {
+        this.removePipe(i)
       }
     }
-  })
+  }
 
+  private scoreIfPassed(pipe: Pipe) {
+    if (pipe.scored || pipe.x > BIRD.x) return
+    pipe.scored = true
+    this.callbacks.onScore()
+  }
+
+  private spawnPipesIfNeeded(delta: number) {
+    this.spawnTimer += delta
+    if (this.spawnTimer < PIPE.spawnInterval) return
+
+    this.spawnTimer -= PIPE.spawnInterval
+    this.spawnPipe(this.spawnX - this.spawnTimer * PIPE.speed)
+  }
+
+  private hasFallen() {
+    return this.birdY < this.floorY
+  }
+
+  private hasCollided() {
+    const birdBox = this.getBirdBox()
+
+    return this.pipes
+      .filter((pipe) => this.isNearBird(pipe))
+      .some((pipe) => this.getPipeBoxes(pipe).some((box) => boxesIntersect(birdBox, box)))
+  }
+
+  private isNearBird(pipe: Pipe) {
+    return Math.abs(pipe.x - BIRD.x) <= PIPE.width + BIRD.width
+  }
+
+  private getBirdBox(): Box {
+    const cos = Math.abs(Math.cos(this.tilt))
+    const sin = Math.abs(Math.sin(this.tilt))
+    const halfWidth = (cos * BIRD.width + sin * BIRD.height) / 2
+    const halfHeight = (sin * BIRD.width + cos * BIRD.height) / 2
+
+    return applyCollisionMargin({
+      minX: BIRD.x - halfWidth,
+      maxX: BIRD.x + halfWidth,
+      minY: this.birdY - halfHeight,
+      maxY: this.birdY + halfHeight,
+    })
+  }
+
+  private getPipeBoxes(pipe: Pipe): Box[] {
+    const { bottomEdgeY, topEdgeY } = getGapEdges(pipe.gapOffset)
+    const minX = pipe.x - PIPE.width / 2
+    const maxX = pipe.x + PIPE.width / 2
+
+    return [
+      applyCollisionMargin({
+        minX,
+        maxX,
+        minY: bottomEdgeY - PIPE.height - PIPE.extensionHeight,
+        maxY: bottomEdgeY,
+      }),
+      applyCollisionMargin({
+        minX,
+        maxX,
+        minY: topEdgeY,
+        maxY: topEdgeY + PIPE.height + PIPE.extensionHeight,
+      }),
+    ]
+  }
+
+  private finishGame() {
+    this.state = "gameover"
+    this.callbacks.onGameOver()
+  }
+}
+
+function useFlappyGame() {
+  const hostRef = useRef<HTMLDivElement>(null)
+  const gameRef = useRef<FlappyGame | null>(null)
+  const [gameState, setGameState] = useState<GameState>("menu")
+  const [score, setScore] = useState(0)
+  const [ready, setReady] = useState(false)
+
+  useEffect(() => {
+    if (!hostRef.current) return
+
+    const game = new FlappyGame(hostRef.current, {
+      onReady: () => setReady(true),
+      onScore: () => setScore((current) => current + 1),
+      onGameOver: () => setGameState("gameover"),
+    })
+    gameRef.current = game
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.code !== JUMP_KEY) return
+      event.preventDefault()
+      game.jump()
+    }
+
+    window.addEventListener("keydown", handleKeyDown)
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown)
+      game.destroy()
+      gameRef.current = null
+    }
+  }, [])
+
+  const start = useCallback(() => {
+    setScore(0)
+    setGameState("playing")
+    gameRef.current?.start()
+  }, [])
+
+  const jump = useCallback(() => {
+    gameRef.current?.jump()
+  }, [])
+
+  return { hostRef, gameState, score, ready, start, jump }
+}
+
+function PlayIcon() {
   return (
-    <>
-      {pipes.map((pipe) => (
-        <PipePair
-          key={pipe.id}
-          x={pipe.x}
-          gapOffset={pipe.gapOffset}
-          gameState={gameState}
-          despawnX={despawnX}
-          onRefsReady={(bottomRef, topRef) => handleRefsReady(pipe.id, bottomRef, topRef)}
-          onOffscreen={() => removePipe(pipe.id)}
-        />
-      ))}
-    </>
+    <svg
+      width={PLAY_ICON.size}
+      height={PLAY_ICON.size}
+      viewBox={PLAY_ICON.viewBox}
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <path d={PLAY_ICON.path} fill={PLAY_ICON.color} stroke={PLAY_ICON.color} />
+    </svg>
   )
 }
 
-function CollisionChecker({ meshRef, obstacleRefs, gameState, onCollision }: {
-  meshRef: React.RefObject<THREE.Mesh | null>
-  obstacleRefs: React.RefObject<THREE.Group | null>[]
-  gameState: GameState
-  onCollision: () => void
+function ActionButton({ label, showIcon = false, onClick }: {
+  label: string
+  showIcon?: boolean
+  onClick: () => void
 }) {
-  useFrame(() => {
-    if (gameState !== "playing") return
-    if (!meshRef.current) return
+  function handlePointerDown(event: React.PointerEvent) {
+    event.stopPropagation()
+    onClick()
+  }
 
-    const birdBox = new THREE.Box3().setFromObject(meshRef.current)
-    birdBox.min.x += COLLISION_MARGIN_X
-    birdBox.max.x -= COLLISION_MARGIN_X
-    birdBox.min.y += COLLISION_MARGIN_Y
-    birdBox.max.y -= COLLISION_MARGIN_Y
-
-    for (const ref of obstacleRefs) {
-      if (!ref.current) continue
-
-      const obstacleBox = new THREE.Box3().setFromObject(ref.current)
-      obstacleBox.min.x += COLLISION_MARGIN_X
-      obstacleBox.max.x -= COLLISION_MARGIN_X
-      obstacleBox.min.y += COLLISION_MARGIN_Y
-      obstacleBox.max.y -= COLLISION_MARGIN_Y
-
-      if (birdBox.intersectsBox(obstacleBox)) {
-        onCollision()
-        return
-      }
-    }
-  })
-
-  return null
-}
-
-function PlayButton({ label, onClick }: { label: string; onClick: (e: React.PointerEvent) => void }) {
   return (
-    <button
-      onPointerDown={(e) => { e.stopPropagation(); onClick(e) }}
-      style={{
-        position: "absolute",
-        top: "50%",
-        left: "50%",
-        transform: "translate(-50%, -50%)",
-        fontSize: "clamp(1.1rem, 5vw, 1.5rem)",
-      }}
-      className="bg-[#F8C82E] px-6 py-2 font-bold border-2 rounded-full shadow-[0_2px_0_0_#000] hover:shadow-[0_0px_0_0_#000] hover:translate-y-[2px] transition-all duration-150 ease-out cursor-pointer flex items-center gap-2"
-    >
-      {label === "Play" && (
-        <svg width="20" height="20" viewBox="0 0 43 54" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M0.5 51.861V1.50235C0.5 0.698763 1.39986 0.223396 2.06364 0.676329L41.6977 27.7208C42.3034 28.134 42.2731 29.037 41.6411 29.4087L2.00702 52.7229C1.34039 53.115 0.5 52.6344 0.5 51.861Z" fill="black" stroke="black"/>
-        </svg>
-      )}
+    <button onPointerDown={handlePointerDown} style={BUTTON_STYLE} className={BUTTON_CLASS}>
+      {showIcon && <PlayIcon />}
       {label}
     </button>
   )
 }
 
+function GameOverScreen({ onRestart }: { onRestart: () => void }) {
+  return (
+    <div style={CENTERED_STYLE} className={GAME_OVER_CLASS}>
+      <span style={GAME_OVER_TITLE_STYLE} className={GAME_OVER_TITLE_CLASS}>
+        {LABELS.gameOver}
+      </span>
+      <ActionButton label={LABELS.restart} onClick={onRestart} />
+    </div>
+  )
+}
+
 function Game() {
-  const birdRef = useRef<THREE.Mesh>(null)
-  const jumpRef = useRef<() => void>(() => {})
-  const [obstacleRefs, setObstacleRefs] = useState<React.RefObject<THREE.Group | null>[]>([])
-  const [gameState, setGameState] = useState<GameState>("menu")
-  const [score, setScore] = useState(0)
-
-  function startGame() {
-    setScore(0)
-    setGameState("playing")
-  }
-
-  function handlePointerDown() {
-    if (gameState === "playing") {
-      jumpRef.current()
-    }
-  }
+  const { hostRef, gameState, score, ready, start, jump } = useFlappyGame()
 
   return (
     <div
-      style={{
-        width: "100%",
-        height: "100dvh",
-        position: "relative",
-        zIndex: 0,
-        touchAction: "none",
-        overscrollBehavior: "none",
-        userSelect: "none",
-        WebkitUserSelect: "none",
-      }}
-      className="bg-[var(--light-blue)]"
-      onPointerDown={handlePointerDown}
-      onContextMenu={(e) => e.preventDefault()}
+      style={ROOT_STYLE}
+      className={ROOT_CLASS}
+      onPointerDown={jump}
+      onContextMenu={(event) => event.preventDefault()}
     >
-      <Canvas orthographic camera={{ position: [0, 0, 10] }} dpr={[1, 2]}>
-        <ResponsiveCamera />
-        <ambientLight intensity={1} />
-        <directionalLight position={[5, 5, 5]} intensity={1} />
-        <group position={[0, -1.5, 0]}>
-          <Bird
-            meshRef={birdRef}
-            gameState={gameState}
-            onGameOver={() => setGameState("gameover")}
-            jumpRef={jumpRef}
-          />
-          <PipeManager
-            gameState={gameState}
-            birdX={BIRD_X}
-            onRefsChange={setObstacleRefs}
-            onScore={() => setScore((s) => s + 1)}
-          />
-        </group>
-        <CollisionChecker
-          meshRef={birdRef}
-          obstacleRefs={obstacleRefs}
-          gameState={gameState}
-          onCollision={() => setGameState("gameover")}
-        />
-      </Canvas>
+      <div ref={hostRef} style={HOST_STYLE} />
 
-      {gameState === "menu" && <PlayButton label="Play" onClick={startGame} />}
-
-      {gameState === "gameover" && (
-        <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)" }} className="flex flex-col items-center gap-4 px-4 text-center">
-          <span style={{ fontSize: "clamp(1.5rem, 7vw, 2rem)" }} className="font-bold text-white mb-24">Game Over</span>
-          <PlayButton label="Restart" onClick={startGame} />
-        </div>
+      {ready && gameState === "menu" && (
+        <ActionButton label={LABELS.play} showIcon onClick={start} />
       )}
 
+      {gameState === "gameover" && <GameOverScreen onRestart={start} />}
+
       {gameState === "playing" && (
-        <div
-          style={{
-            position: "absolute",
-            top: "80px",
-            left: "50%",
-            transform: "translateX(-50%)",
-            fontSize: "clamp(1.75rem, 8vw, 2.25rem)",
-          }}
-          className="font-bold text-white pointer-events-none"
-        >
+        <div style={SCORE_STYLE} className={SCORE_CLASS}>
           {score}
         </div>
       )}
